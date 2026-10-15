@@ -145,7 +145,22 @@ function buildAppMenu() {
         { role: 'zoomOut' },
         { role: 'resetZoom' },
         { type: 'separator' },
-        { label: 'Toggle DevTools', accelerator: 'F12', click: (item, win) => { if (win) win.webContents.toggleDevTools(); } }
+        { label: 'Toggle DevTools', accelerator: 'F12', click: (item, win) => { if (win) win.webContents.toggleDevTools(); } },
+        { type: 'separator' },
+        {
+          label: 'Hardware acceleration (GPU)',
+          type: 'checkbox',
+          checked: enableGpu,
+          click: (item) => {
+            const s = readSettings();
+            s.hardwareAcceleration = item.checked;
+            writeSettings(s);
+            const baseArgs = process.argv.slice(1).filter((a) => a !== '--enable-gpu');
+            const args = item.checked ? baseArgs.concat(['--enable-gpu']) : baseArgs;
+            app.relaunch({ args });
+            app.exit(0);
+          }
+        }
       ]
     },
     {
@@ -348,6 +363,30 @@ const flashPath = findFlash();
 // Flash'i aktive et (kaiserdj client ile ayni yaklasim)
 app.commandLine.appendSwitch('ppapi-flash-path', flashPath);
 app.commandLine.appendSwitch('ignore-certificate-errors');
+
+// GPU / donanim hizlandirma: bazi ekran karti/suruculerde siyah ekrana yol acar.
+// Varsayilan olarak KAPALI (yazilim render). Acmak icin menu > View > "Hardware acceleration (GPU)",
+// ya da --enable-gpu argumani / ASTRA_GPU=1 ortam degiskeni.
+function settingsPath() {
+  const dir = path.join(app.getPath('appData'), 'Astra Browser');
+  try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { /* ignore */ }
+  return path.join(dir, 'settings.json');
+}
+function readSettings() {
+  try { return JSON.parse(fs.readFileSync(settingsPath(), 'utf8')) || {}; } catch (e) { return {}; }
+}
+function writeSettings(obj) {
+  try { fs.writeFileSync(settingsPath(), JSON.stringify(obj, null, 2), 'utf8'); } catch (e) { /* ignore */ }
+}
+
+const enableGpu = process.argv.includes('--enable-gpu')
+  || process.env.ASTRA_GPU === '1'
+  || readSettings().hardwareAcceleration === true;
+if (!enableGpu) {
+  try { app.disableHardwareAcceleration(); } catch (e) { /* ignore */ }
+  app.commandLine.appendSwitch('disable-gpu');
+  app.commandLine.appendSwitch('disable-gpu-compositing');
+}
 
 app.on('window-all-closed', () => app.quit());
 
