@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Astra Browser - Accounts</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: #1e1e1e;
+      color: #e8e8e8;
+      font-family: "Segoe UI", Arial, sans-serif;
+      font-size: 13px;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 14px;
+      background: #252526;
+      border-bottom: 1px solid #333;
+    }
+    header img { width: 28px; height: 28px; border-radius: 6px; }
+    header h1 { font-size: 15px; margin: 0; flex: 1; font-weight: 600; }
+    button {
+      cursor: pointer;
+      border: 0;
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-size: 13px;
+      color: #fff;
+      background: #3a3d41;
+    }
+    button:hover { filter: brightness(1.15); }
+    button.primary { background: #2e7d32; }
+    button.danger { background: #a1262b; }
+    #list { padding: 10px 12px; }
+    .acc {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 12px;
+      border-radius: 8px;
+      background: #2a2a2c;
+      margin-bottom: 8px;
+    }
+    .acc .name {
+      flex: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 600;
+    }
+    .empty { color: #888; text-align: center; padding: 28px 12px; }
+    form {
+      display: none;
+      flex-direction: column;
+      gap: 8px;
+      padding: 12px 14px;
+      background: #232324;
+      border-bottom: 1px solid #333;
+    }
+    form.show { display: flex; }
+    form .title { font-weight: 600; margin-bottom: 2px; }
+    input {
+      padding: 9px 10px;
+      border-radius: 6px;
+      border: 1px solid #444;
+      background: #151515;
+      color: #e8e8e8;
+      font-size: 13px;
+    }
+    input:focus { outline: none; border-color: #2e7d32; }
+    .row { display: flex; gap: 8px; }
+    .row button { flex: 1; }
+  </style>
+</head>
+<body>
+  <header>
+    <img src="icon.png" alt="">
+    <h1>Astra Browser &mdash; Accounts</h1>
+    <button class="primary" id="newBtn">+ Add account</button>
+  </header>
+
+  <form id="form">
+    <div class="title" id="formTitle">New account</div>
+    <input id="username" placeholder="Username" autocomplete="off" spellcheck="false">
+    <input id="password" type="password" placeholder="Password" autocomplete="off">
+    <div class="row">
+      <button type="submit" class="primary" id="saveBtn">Save</button>
+      <button type="button" id="cancelBtn">Cancel</button>
+    </div>
+  </form>
+
+  <div id="list"></div>
+
+  <script src="manager-renderer.js"></script>
+</body>
+</html>

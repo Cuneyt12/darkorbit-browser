@@ -1,0 +1,6 @@
+{
+  "name": "astra-browser",
+  "version": "1.0.0",
+  "description": "Astra Browser - DarkOrbit backpage icin Flash destekli custom browser (Chromium 87 + pepper flash)",
+  "main": "main.js"
+}

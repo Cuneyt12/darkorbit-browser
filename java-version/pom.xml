@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>com.cuneyt</groupId>
+    <artifactId>darkorbit-browser</artifactId>
+    <version>1.0.0</version>
+    <packaging>jar</packaging>
+
+    <properties>
+        <maven.compiler.source>11</maven.compiler.source>
+        <maven.compiler.target>11</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+
+    <dependencies>
+        <!--
+            JCEF (Chromium Embedded Framework) jar.
+            Bu jar'i libs/jcef.jar icine koy. Flash calismasi icin CEF 87 surumu ile derlenmis
+            jcef.jar kullanilmalidir (bkz. build talimatlari). Maven Central'da hazir paket YOK.
+        -->
+        <dependency>
+            <groupId>org.cef</groupId>
+            <artifactId>jcef</artifactId>
+            <version>87.1.12</version>
+            <scope>system</scope>
+            <systemPath>${project.basedir}/libs/jcef.jar</systemPath>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>darkorbit-browser</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.8.1</version>
+                <configuration>
+                    <source>11</source>
+                    <target>11</target>
+                    <encoding>UTF-8</encoding>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.3.0</version>
+                <configuration>
+                    <archive>
+                        <manifest>
+                            <mainClass>com.cuneyt.darkorbitbrowser.BackpageBrowser</mainClass>
+                        </manifest>
+                    </archive>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch4jConfig>
+    <dontWrapJar>false</dontWrapJar>
+    <headerType>gui</headerType>
+    <jar>darkorbit-browser.jar</jar>
+    <outfile>DarkOrbit Browser.exe</outfile>
+    <errTitle>DarkOrbit Browser</errTitle>
+    <chdir>.</chdir>
+    <priority>normal</priority>
+    <stayAlive>false</stayAlive>
+    <restartOnCrash>false</restartOnCrash>
+    <manifest></manifest>
+    <icon></icon>
+
+    <classPath>
+        <mainClass>com.cuneyt.darkorbitbrowser.BackpageBrowser</mainClass>
+        <cp>jcef\jcef.jar</cp>
+        <cp>jcef\bin\jcef.jar</cp>
+    </classPath>
+
+    <jre>
+        <path></path>
+        <bundledJre64Bit>false</bundledJre64Bit>
+        <bundledJreAsFallback>false</bundledJreAsFallback>
+        <minVersion>11</minVersion>
+        <jdkPreference>preferJre</jdkPreference>
+        <runtimeBits>64</runtimeBits>
+        <opt>-Dfile.encoding=UTF-8</opt>
+        <opt>-Djava.library.path=jcef;jcef\bin;jcef\bin\lib;jcef\bin\lib\win64</opt>
+    </jre>
+
+    <versionInfo>
+        <fileVersion>1.0.0.0</fileVersion>
+        <txtFileVersion>1.0.0</txtFileVersion>
+        <fileDescription>DarkOrbit Browser (Flash - JCEF/CEF87)</fileDescription>
+        <copyright>cuneyt</copyright>
+        <productVersion>1.0.0.0</productVersion>
+        <txtProductVersion>1.0.0</txtProductVersion>
+        <productName>DarkOrbit Browser</productName>
+        <internalName>DarkOrbit Browser</internalName>
+        <originalFilename>DarkOrbit Browser.exe</originalFilename>
+    </versionInfo>
+</launch4jConfig>

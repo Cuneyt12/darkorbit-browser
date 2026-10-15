@@ -1,0 +1,60 @@
+{
+  "name": "astra-browser",
+  "version": "1.0.0",
+  "description": "Astra Browser - DarkOrbit backpage icin Flash destekli custom browser (Chromium 87 + pepper flash)",
+  "author": "Cuneyt",
+  "license": "MIT",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --win --dir",
+    "dist": "electron-builder --win nsis"
+  },
+  "devDependencies": {
+    "electron": "11.5.0",
+    "electron-builder": "^24.13.3",
+    "rcedit": "^5.0.2"
+  },
+  "build": {
+    "appId": "com.cuneyt.astrabrowser",
+    "productName": "Astra Browser",
+    "asar": true,
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "afterPack": "build/afterPack.js",
+    "files": [
+      "electron/**/*",
+      "!electron/package.json",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "flash",
+        "to": "flash"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "runAfterFinish": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Astra Browser",
+      "artifactName": "AstraBrowser-Setup-${version}.exe"
+    }
+  }
+}
