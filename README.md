@@ -63,6 +63,41 @@ Accounts and their passwords are stored at `%APPDATA%\Astra Browser\accounts.jso
 | `--url <url>` | Explicit URL to open (used with a bare `--dosid`). |
 | `--instance <name>` | Server instance (e.g. `int1`) used with a bare `--dosid`. |
 | `--selftest` | Print diagnostics and exit (used for verification). |
+| `--captcha` | Open a small captcha window, let the user solve hCaptcha, and write the token to the result file. |
+| `--client <Flash\|Unity>` | Client/user-agent for captcha login (`BigpointClient/1.6.9` or `DarkOrbit Unity Client 1.1.115`). |
+| `--result-file <path>` | Result file for captcha mode: `[captchaResult]<token>` or `[captchaFailed]<reason>`. |
+| `--timeout <ms>` | Captcha timeout (default `120000`). |
+| `--width <px>`, `--height <px>` | Captcha window size (default `430x650`). |
+| `--proxy-host <host>`, `--proxy-port <port>` | Proxy used by the captcha window. |
+| `--proxy-user <user>`, `--proxy-pass <pass>` | Proxy credentials. |
+| `--proxy-type <http\|socks5>` | Proxy type (default `http`; HTTP CONNECT auth is more reliable in Chromium). |
+
+### Captcha mode
+
+The captcha window can also be configured with environment variables, which avoids
+putting credentials on the command line:
+
+```bat
+set ASTRA_MODE=captcha
+set ASTRA_RESULT_FILE=C:\temp\captcha.txt
+set ASTRA_CLIENT=Flash
+set ASTRA_URL=https://www.darkorbit.com/
+set ASTRA_TIMEOUT=120000
+set ASTRA_PROXY_TYPE=http
+set ASTRA_PROXY_HOST=127.0.0.1
+set ASTRA_PROXY_PORT=8080
+set ASTRA_PROXY_USER=user
+set ASTRA_PROXY_PASS=pass
+"Astra Browser.exe"
+```
+
+The window loads the login page with the selected client user-agent. The user
+only solves the captcha; form submission is blocked so the token is not consumed.
+When solved, the token is written to `ASTRA_RESULT_FILE` as
+`[captchaResult]<token>` and the window closes. On timeout or close it writes
+`[captchaFailed]<reason>`. The caller should submit the token immediately
+(single-use) and must use the same egress IP as the browser.
+
 
 ## How it works
 

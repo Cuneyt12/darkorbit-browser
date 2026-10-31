@@ -46,11 +46,20 @@ try {
 } catch (e) { /* ignore */ }
 
 function parseArgs(argv) {
-  const out = { dosid: null, url: null, instance: null, selftest: false };
+  const out = {
+    dosid: null, url: null, instance: null, selftest: false,
+    captcha: false, client: null, resultFile: null, timeout: 120000,
+    width: 430, height: 650,
+    proxyHost: null, proxyPort: null, proxyUser: null, proxyPass: null, proxyType: null
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--selftest') {
       out.selftest = true;
+      continue;
+    }
+    if (a === '--captcha') {
+      out.captcha = true;
       continue;
     }
     let key = a;
@@ -64,6 +73,16 @@ function parseArgs(argv) {
     if (key === '--dosid') out.dosid = take();
     else if (key === '--url') out.url = take();
     else if (key === '--instance') out.instance = take();
+    else if (key === '--client') out.client = take();
+    else if (key === '--result-file') out.resultFile = take();
+    else if (key === '--timeout') out.timeout = parseInt(take(), 10) || 120000;
+    else if (key === '--width') out.width = parseInt(take(), 10) || 430;
+    else if (key === '--height') out.height = parseInt(take(), 10) || 650;
+    else if (key === '--proxy-host') out.proxyHost = take();
+    else if (key === '--proxy-port') out.proxyPort = take();
+    else if (key === '--proxy-user') out.proxyUser = take();
+    else if (key === '--proxy-pass') out.proxyPass = take();
+    else if (key === '--proxy-type') out.proxyType = take();
   }
   return out;
 }
@@ -357,7 +376,113 @@ function registerIpc() {
   });
 }
 
+async function runCaptchaMode(cfg) {
+  const c = (cfg.client || '').toLowerCase();
+  const ua = c.includes('unity') ? 'DarkOrbit Unity Client 1.1.115' : 'BigpointClient/1.6.9';
+  const partition = 'astra-captcha-' + rid();
+  const ses = session.fromPartition(partition);
+  try { ses.setUserAgent(ua); } catch (e) { /* ignore */ }
+  if (cfg.proxyHost && cfg.proxyPort) {
+    try {
+      const proxyType = cfg.proxyType || 'http';
+      await ses.setProxy({ proxyRules: proxyType + '://' + cfg.proxyHost + ':' + cfg.proxyPort });
+    } catch (e) {
+      console.error('Proxy ayarlanamadi: ' + e);
+    }
+  }
+
+  const resultFile = cfg.resultFile;
+  const timeoutMs = Math.max(10000, cfg.timeout || 120000);
+  let done = false;
+  let timer = null;
+  let poll = null;
+  const finish = (text) => {
+    if (done) return;
+    done = true;
+    if (poll) clearInterval(poll);
+    if (timer) clearTimeout(timer);
+    try { if (resultFile) fs.writeFileSync(resultFile, text, 'utf8'); } catch (e) { /* ignore */ }
+    try { console.log(text); } catch (e) { /* ignore */ }
+    setTimeout(() => { try { app.quit(); } catch (e) { /* ignore */ } }, 200);
+  };
+
+  const win = new BrowserWindow({
+    width: cfg.width || 430,
+    height: cfg.height || 650,
+    title: 'DarkOrbit Captcha',
+    icon: ICON_PATH,
+    backgroundColor: '#000000',
+    autoHideMenuBar: true,
+    resizable: true,
+    center: true,
+    webPreferences: {
+      partition,
+      plugins: true,
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+  win.setMenuBarVisibility(false);
+  win.on('closed', () => { if (!done) finish('[captchaFailed]closed'); });
+
+  timer = setTimeout(() => finish('[captchaFailed]timeout'), timeoutMs);
+
+  win.webContents.on('did-finish-load', () => {
+    win.webContents.executeJavaScript(`(function(){
+      try {
+        document.addEventListener('submit', function(e){ e.preventDefault(); }, true);
+        var c = document.querySelector('.bgcdw_captcha') || document.querySelector('.h-captcha');
+        if (c) c.scrollIntoView({ block: 'center' });
+      } catch (e) {}
+    })();`, true).catch(() => {});
+  });
+
+  poll = setInterval(() => {
+    if (done || win.isDestroyed()) return;
+    win.webContents.executeJavaScript(`(function(){
+      var els = document.querySelectorAll('textarea[name="h-captcha-response"], textarea[name="g-recaptcha-response"], input[name="h-captcha-response"], input[name="g-recaptcha-response"]');
+      for (var i = 0; i < els.length; i++) {
+        var v = (els[i].value || '').trim();
+        if (v.length > 20) return v;
+      }
+      return '';
+    })();`, true).then((token) => {
+      if (token && token.length > 20) finish('[captchaResult]' + token);
+    }).catch(() => {});
+  }, 500);
+
+  try {
+    await win.loadURL(cfg.url || 'https://www.darkorbit.com/', { userAgent: ua });
+  } catch (e) {
+    finish('[captchaFailed]load');
+  }
+}
+
 const args = parseArgs(process.argv.slice(1));
+
+// Alternatif: parametre yerine ortam degiskenleri (ProcessBuilder ile daha guvenli).
+if (process.env.ASTRA_MODE === 'captcha' || process.env.ASTRA_CAPTCHA === '1') args.captcha = true;
+if (process.env.ASTRA_RESULT_FILE) args.resultFile = process.env.ASTRA_RESULT_FILE;
+if (process.env.ASTRA_CLIENT) args.client = process.env.ASTRA_CLIENT;
+if (process.env.ASTRA_URL) args.url = process.env.ASTRA_URL;
+if (process.env.ASTRA_TIMEOUT) args.timeout = parseInt(process.env.ASTRA_TIMEOUT, 10) || args.timeout;
+if (process.env.ASTRA_WIDTH) args.width = parseInt(process.env.ASTRA_WIDTH, 10) || args.width;
+if (process.env.ASTRA_HEIGHT) args.height = parseInt(process.env.ASTRA_HEIGHT, 10) || args.height;
+if (process.env.ASTRA_PROXY_HOST) args.proxyHost = process.env.ASTRA_PROXY_HOST;
+if (process.env.ASTRA_PROXY_PORT) args.proxyPort = process.env.ASTRA_PROXY_PORT;
+if (process.env.ASTRA_PROXY_USER) args.proxyUser = process.env.ASTRA_PROXY_USER;
+if (process.env.ASTRA_PROXY_PASS) args.proxyPass = process.env.ASTRA_PROXY_PASS;
+if (process.env.ASTRA_PROXY_TYPE) args.proxyType = process.env.ASTRA_PROXY_TYPE;
+
+// Proxy kimlik dogrulamasi (SOCKS5/HTTP). Bot ile ayni proxy kullanildiginda gerekir.
+if (args.proxyHost && args.proxyPort) {
+  app.on('login', (event, webContents, request, authInfo, callback) => {
+    if (authInfo && authInfo.isProxy) {
+      event.preventDefault();
+      callback(args.proxyUser || '', args.proxyPass || '');
+    }
+  });
+}
 const flashPath = findFlash();
 
 // Flash'i aktive et (kaiserdj client ile ayni yaklasim)
@@ -408,6 +533,11 @@ app.whenReady().then(async () => {
       fs.writeFileSync(path.join(path.dirname(app.getPath('exe')), 'selftest.log'), lines.join('\r\n'), 'utf8');
     } catch (e) { /* ignore */ }
     app.quit();
+    return;
+  }
+
+  if (args.captcha) {
+    await runCaptchaMode(args);
     return;
   }
 
