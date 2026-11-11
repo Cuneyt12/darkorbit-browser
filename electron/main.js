@@ -686,7 +686,24 @@ if (!enableGpu) {
 
 app.on('window-all-closed', () => app.quit());
 
+// Kurulu surumu bot okuyabilsin diye damga dosyasi yaz.
+// (%APPDATA%\Astra Browser\version.txt ve exe'nin yanindaki version.txt)
+function writeVersionMarker() {
+  const body = app.getVersion() + '\r\n';
+  const targets = [];
+  try { targets.push(path.join(app.getPath('appData'), 'Astra Browser', 'version.txt')); } catch (e) { /* ignore */ }
+  try { targets.push(path.join(path.dirname(app.getPath('exe')), 'version.txt')); } catch (e) { /* ignore */ }
+  for (const target of targets) {
+    try {
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, body, 'utf8');
+    } catch (e) { /* ignore */ }
+  }
+}
+
 app.whenReady().then(async () => {
+  writeVersionMarker();
+
   if (args.selftest) {
     const lines = [
       'selftest=ok',
