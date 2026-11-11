@@ -94,9 +94,25 @@ set ASTRA_PROXY_PASS=pass
 The window loads the login page with the selected client user-agent. The user
 only solves the captcha; form submission is blocked so the token is not consumed.
 When solved, the token is written to `ASTRA_RESULT_FILE` as
-`[captchaResult]<token>` and the window closes. On timeout or close it writes
-`[captchaFailed]<reason>`. The caller should submit the token immediately
-(single-use) and must use the same egress IP as the browser.
+`[captchaResult]<token>` and the window closes. The caller should submit the token
+immediately (single-use) and must use the same egress IP as the browser.
+
+Other results the caller has to handle:
+
+| Result | Meaning |
+| --- | --- |
+| `[captchaNotRequired]` | The login page was served **without** a captcha block, so there is nothing to solve. Retry the login without a token. |
+| `[captchaFailed]timeout` | Nobody solved the captcha before `ASTRA_TIMEOUT`. |
+| `[captchaFailed]closed` | The window was closed manually. |
+| `[captchaFailed]load:<code>:<text>:proxy=<type>` | The page (or the proxy tunnel) could not be loaded. The error page shows the code; the proxy type that failed is included. |
+| `[captchaFailed]hcaptcha-not-loaded` | The captcha block exists but the hCaptcha iframe never rendered — usually the proxy blocks `js.hcaptcha.com` / `newassets.hcaptcha.com`. |
+
+The captcha challenge is decided per request by the server, not per IP: a page
+load can legitimately come back without a captcha even when an earlier load from
+the same IP had one. That is what `[captchaNotRequired]` reports.
+
+If `http` tunneling fails, the window retries the same proxy once as `socks5`
+(and vice versa) before reporting a load error.
 
 
 ## How it works

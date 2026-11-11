@@ -15,7 +15,7 @@
 //    "Astra Browser.exe" --selftest
 // ============================================================
 
-const { app, BrowserWindow, session, Menu, MenuItem, clipboard, ipcMain } = require('electron');
+const { app, BrowserWindow, session, Menu, MenuItem, clipboard, ipcMain, net } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -133,6 +133,28 @@ function resolveTarget(args) {
 }
 
 const isHttp = (u) => typeof u === 'string' && /^https?:\/\//i.test(u);
+
+// Verilen oturumun (proxy dahil) cikis IP'sini dondurur.
+// Captcha IP'ye bagli geldigi icin Astra'nin bot ile AYNI IP'den ciktigini dogrular.
+function egressIP(ses, proxyUser, proxyPass) {
+  return new Promise((resolve) => {
+    try {
+      const req = net.request({ method: 'GET', url: 'https://api.ipify.org', session: ses });
+      let body = '';
+      // Proxy kimlik dogrulamasi net.request icin ayri event.
+      req.on('login', (authInfo, callback) => callback(proxyUser || '', proxyPass || ''));
+      req.on('response', (res) => {
+        res.on('data', (chunk) => { body += chunk.toString(); });
+        res.on('end', () => resolve(body.trim()));
+        res.on('error', () => resolve(''));
+      });
+      req.on('error', () => resolve(''));
+      req.end();
+    } catch (e) {
+      resolve('');
+    }
+  });
+}
 
 let managerWindow = null;
 let activeBrowserWindow = null;
@@ -382,28 +404,46 @@ async function runCaptchaMode(cfg) {
   const partition = 'astra-captcha-' + rid();
   const ses = session.fromPartition(partition);
   try { ses.setUserAgent(ua); } catch (e) { /* ignore */ }
+
+  const proxyTypes = [];
   if (cfg.proxyHost && cfg.proxyPort) {
+    const requested = cfg.proxyType || 'http';
+    proxyTypes.push(requested);
+    // http <-> socks5: proxy her iki protokolu desteklemeyebilir; tunnel hatasinda digerini deneriz.
+    proxyTypes.push(requested === 'http' ? 'socks5' : 'http');
+  }
+  let proxyIdx = 0;
+  const applyProxy = async () => {
+    if (!proxyTypes.length) return;
+    const type = proxyTypes[proxyIdx];
     try {
-      const proxyType = cfg.proxyType || 'http';
-      await ses.setProxy({ proxyRules: proxyType + '://' + cfg.proxyHost + ':' + cfg.proxyPort });
+      await ses.setProxy({ proxyRules: type + '://' + cfg.proxyHost + ':' + cfg.proxyPort });
+      console.log('Proxy: ' + type + '://' + cfg.proxyHost + ':' + cfg.proxyPort);
     } catch (e) {
       console.error('Proxy ayarlanamadi: ' + e);
     }
-  }
+  };
+  await applyProxy();
 
   const resultFile = cfg.resultFile;
   const timeoutMs = Math.max(10000, cfg.timeout || 120000);
   let done = false;
   let timer = null;
   let poll = null;
-  const finish = (text) => {
+  let noCaptchaTimer = null;
+  let currentIp = '';
+  const finish = (text, delayMs) => {
     if (done) return;
     done = true;
     if (poll) clearInterval(poll);
     if (timer) clearTimeout(timer);
-    try { if (resultFile) fs.writeFileSync(resultFile, text, 'utf8'); } catch (e) { /* ignore */ }
-    try { console.log(text); } catch (e) { /* ignore */ }
-    setTimeout(() => { try { app.quit(); } catch (e) { /* ignore */ } }, 200);
+    if (noCaptchaTimer) clearTimeout(noCaptchaTimer);
+    // Token disindaki sonuclara Astra'nin cikis IP'sini ekle (bot loglar).
+    let out = text;
+    if (currentIp && !String(text).startsWith('[captchaResult]')) out = text + '|astraIp=' + currentIp;
+    try { if (resultFile) fs.writeFileSync(resultFile, out, 'utf8'); } catch (e) { /* ignore */ }
+    try { console.log(out); } catch (e) { /* ignore */ }
+    setTimeout(() => { try { app.quit(); } catch (e) { /* ignore */ } }, delayMs === undefined ? 200 : delayMs);
   };
 
   const win = new BrowserWindow({
@@ -425,16 +465,145 @@ async function runCaptchaMode(cfg) {
   win.setMenuBarVisibility(false);
   win.on('closed', () => { if (!done) finish('[captchaFailed]closed'); });
 
+  const refreshIp = async () => {
+    currentIp = await egressIP(ses, cfg.proxyUser, cfg.proxyPass);
+    if (!currentIp && !win.isDestroyed()) {
+      // net.request proxy'yi gecemezse sayfa icinden dene (ayni oturum/proxy).
+      try {
+        const ip = await win.webContents.executeJavaScript(
+          'fetch("https://api.ipify.org").then(function(r){return r.text();}).catch(function(){return "";})', true);
+        currentIp = String(ip || '').trim();
+      } catch (e) { /* ignore */ }
+    }
+    if (currentIp) {
+      console.log('Astra egress IP: ' + currentIp);
+      try { if (!win.isDestroyed()) win.setTitle('DarkOrbit Captcha - IP ' + currentIp); } catch (e) { /* ignore */ }
+    } else {
+      console.log('Astra egress IP: unknown');
+    }
+  };
+  const injectIpBadge = () => {
+    if (!currentIp || done) return;
+    win.webContents.executeJavaScript(`(function(){
+      if (document.getElementById('astra-ip')) return;
+      var d = document.createElement('div');
+      d.id = 'astra-ip';
+      d.style.cssText = 'position:fixed;right:8px;bottom:8px;background:rgba(0,0,0,.78);color:#8fe3c0;font:12px Segoe UI,Arial;padding:4px 8px;border-radius:4px;z-index:2147483647';
+      d.textContent = 'IP: ${currentIp}';
+      document.body.appendChild(d);
+    })();`, true).catch(() => {});
+  };
+  await refreshIp();
+
   timer = setTimeout(() => finish('[captchaFailed]timeout'), timeoutMs);
 
-  win.webContents.on('did-finish-load', () => {
-    win.webContents.executeJavaScript(`(function(){
+  // Captcha iframe'i (hCaptcha) sayfa yuklendikten SONRA olusuyor; bu yuzden
+  // scroll ve "captcha var mi" kontrolu birkac saniye boyunca tekrarlanir.
+  const pageProbe = `(function(){
+    var box = document.querySelector('.bgcdw_captcha, .h-captcha');
+    var frame = document.querySelector('iframe[src*="hcaptcha"], iframe[title*="hCaptcha"]');
+    var r = box ? box.getBoundingClientRect() : null;
+    return {
+      hasBox: !!box,
+      hasFrame: !!frame,
+      boxH: r ? Math.round(r.height) : 0,
+      bodyLen: (document.body ? document.body.innerText.length : 0)
+    };
+  })();`;
+
+  const scheduleNoCaptchaCheck = () => {
+    if (noCaptchaTimer) clearTimeout(noCaptchaTimer);
+    noCaptchaTimer = setTimeout(async () => {
+      if (done || win.isDestroyed()) return;
       try {
-        document.addEventListener('submit', function(e){ e.preventDefault(); }, true);
-        var c = document.querySelector('.bgcdw_captcha') || document.querySelector('.h-captcha');
-        if (c) c.scrollIntoView({ block: 'center' });
-      } catch (e) {}
-    })();`, true).catch(() => {});
+        const probe = await win.webContents.executeJavaScript(pageProbe, true);
+        if (!probe.hasBox) {
+          // SAS bu istekte captcha sormadi: cozulecek bir sey yok.
+          finish('[captchaNotRequired]', 1200);
+          return;
+        }
+        // Kutu var ama hCaptcha iframe'i hic olusmadi: widget yuklenemedi
+        // (genelde proxy js.hcaptcha.com / newassets.hcaptcha.com'u engelliyor).
+        setTimeout(async () => {
+          if (done || win.isDestroyed()) return;
+          try {
+            const p2 = await win.webContents.executeJavaScript(pageProbe, true);
+            if (p2.hasBox && !p2.hasFrame) {
+              try {
+                await win.webContents.executeJavaScript(`(function(){
+                  if (document.getElementById('astra-note')) return;
+                  var d = document.createElement('div');
+                  d.id = 'astra-note';
+                  d.style.cssText = 'position:fixed;left:0;right:0;bottom:0;background:#7a1f1f;color:#fff;font:13px Segoe UI,Arial;padding:10px;z-index:2147483647';
+                  d.textContent = 'hCaptcha could not be loaded. The proxy is probably blocking js.hcaptcha.com / newassets.hcaptcha.com.';
+                  document.body.appendChild(d);
+                })();`, true);
+              } catch (e) { /* ignore */ }
+              finish('[captchaFailed]hcaptcha-not-loaded', 5000);
+            }
+          } catch (e) { /* ignore */ }
+        }, 8000);
+      } catch (e) { /* ignore */ }
+    }, 5000);
+  };
+
+  const scrollToCaptcha = async () => {
+    try {
+      await win.webContents.executeJavaScript(`(function(){
+        try {
+          document.addEventListener('submit', function(e){ e.preventDefault(); }, true);
+          var box = document.querySelector('.bgcdw_captcha') || document.querySelector('.h-captcha');
+          if (box) box.scrollIntoView({ block: 'center' });
+        } catch (e) {}
+      })();`, true);
+    } catch (e) { /* ignore */ }
+  };
+
+  win.webContents.on('did-finish-load', () => {
+    scrollToCaptcha();
+    refreshIp().then(() => injectIpBadge()).catch(() => {});
+    let tries = 0;
+    const iv = setInterval(async () => {
+      tries++;
+      if (done || win.isDestroyed() || tries > 12) { clearInterval(iv); return; }
+      try {
+        const probe = await win.webContents.executeJavaScript(pageProbe, true);
+        if (probe.hasBox && probe.boxH > 0) {
+          clearInterval(iv);
+          scrollToCaptcha();
+        }
+      } catch (e) { clearInterval(iv); }
+    }, 500);
+    scheduleNoCaptchaCheck();
+  });
+
+  win.webContents.on('did-fail-load', async (event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (!isMainFrame || done) return;
+    // -3 = ERR_ABORTED: baska bir navigasyon oncekini iptal etti, gercek hata degil.
+    if (errorCode === -3) return;
+    // Proxy tunnel hatalari: diger proxy protokolu ile bir kez daha dene.
+    const tunnelError = errorCode === -111 || errorCode === -336 || errorCode === -100 || errorCode === -118 || errorCode === -130;
+    if (tunnelError && proxyTypes.length > 1 && proxyIdx < proxyTypes.length - 1) {
+      proxyIdx++;
+      console.log('Load failed (' + errorCode + '), proxy tipi tekrar deneniyor: ' + proxyTypes[proxyIdx]);
+      await applyProxy();
+      await refreshIp();
+      try { await win.loadURL(cfg.url || 'https://www.darkorbit.com/', { userAgent: ua }); } catch (e) { /* asagida ele alinir */ }
+      return;
+    }
+    const reason = '[captchaFailed]load:' + errorCode + ':' + errorDescription +
+      (proxyTypes.length ? ':proxy=' + proxyTypes[proxyIdx] : '');
+    console.log(reason);
+    try {
+      const html = '<html><body style="font-family:Segoe UI,Arial;background:#1e1e1e;color:#eee;padding:18px">' +
+        '<h3 style="margin:0 0 10px">Page could not be loaded</h3>' +
+        '<p style="margin:0 0 8px">Error ' + errorCode + ': ' + String(errorDescription || '') + '</p>' +
+        '<p style="margin:0;color:#bbb">URL: ' + String(validatedURL || '') + '</p>' +
+        (proxyTypes.length ? '<p style="margin:8px 0 0;color:#bbb">Proxy: ' + proxyTypes[proxyIdx] + '://' + cfg.proxyHost + ':' + cfg.proxyPort + '</p>' : '') +
+        '</body></html>';
+      await win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+    } catch (e) { /* ignore */ }
+    finish(reason, 4000);
   });
 
   poll = setInterval(() => {
@@ -451,10 +620,12 @@ async function runCaptchaMode(cfg) {
     }).catch(() => {});
   }, 500);
 
+  try { win.show(); win.focus(); } catch (e) { /* ignore */ }
+
   try {
     await win.loadURL(cfg.url || 'https://www.darkorbit.com/', { userAgent: ua });
   } catch (e) {
-    finish('[captchaFailed]load');
+    if (!done) console.log('loadURL rejected: ' + e.message);
   }
 }
 
