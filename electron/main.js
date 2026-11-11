@@ -242,32 +242,60 @@ function prepareLanguageSession(ses) {
   return applyLanguageCookie(ses);
 }
 
+// ---- Tanilama (yalnizca ASTRA_DIAG_DIR verildiginde) ----
+const DIAG_DIR = process.env.ASTRA_DIAG_DIR || '';
+
+let DIAG_SEQ = 0;
+
+function diagWrite(rel, text) {
+  if (!DIAG_DIR) return;
+  try {
+    const p = path.join(DIAG_DIR, rel);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, text, 'utf8');
+  } catch (e) { /* ignore */ }
+}
+
+function diagSafe(name) {
+  return String(name || '').replace(/[^a-zA-Z0-9._-]+/g, '_').slice(0, 120);
+}
+
+function diagNote(win, note) {
+  try { win.__diag.notes.push(new Date().toISOString() + ' ' + note); } catch (e) { /* ignore */ }
+}
+
 // Backpage HTML'i sunucudan "tr" olarak geliyor (ulke sunuculari). Istemci dilini
 // bu HTML'deki flashvar belirledigi icin yanit govdesini CDP ile yeniden yaziyoruz:
 //   "lang":"tr"  ->  "lang":"de"
-// Boylece TR sunucusunda da oyun istemcisi secilen dilde acilir.
-function installLanguageRewrite(win) {
-  if (!language) return;
+// ASTRA_DIAG_DIR set ise ayni gecis noktasindan tanilama dosyalari da yazilir.
+function installBackpageHook(win) {
+  if (!language && !DIAG_DIR) return;
+  win.__diag = win.__diag || { seq: 0, net: [], netById: {}, console: [], notes: [], page: 0 };
   const dbg = win.webContents.debugger;
-  let ready = false;
-  let busy = false;
+  let attached = false;
 
   const enable = () => {
-    if (ready || busy) return;
-    busy = true;
+    if (attached) return;
     try {
       if (!dbg.isAttached()) dbg.attach('1.3');
+      attached = true;
     } catch (e) {
-      /* zaten bagli olabilir */
+      diagNote(win, 'debugger attach failed: ' + e.message);
+      return;
     }
-    ready = true;
-    busy = false;
+    if (DIAG_DIR) {
+      dbg.sendCommand('Network.enable', {}).catch(() => {});
+      if (language) diagNote(win, 'language rewrite active: ' + language.code);
+    }
     dbg.sendCommand('Fetch.enable', {
       patterns: [{ urlPattern: '*indexInternal.es*', requestStage: 'Response' }]
-    }).catch(() => { /* ignore */ });
+    }).catch(() => {});
   };
 
   dbg.on('message', async (event, method, params) => {
+    if (DIAG_DIR) {
+      try { collectNetwork(win, method, params, dbg); } catch (e) { /* ignore */ }
+    }
     if (method !== 'Fetch.requestPaused') return;
     const id = params.requestId;
     const url = params.request ? params.request.url : '';
@@ -288,12 +316,31 @@ function installLanguageRewrite(win) {
       let body = bodyRes.base64Encoded
         ? Buffer.from(bodyRes.body, 'base64').toString('binary')
         : bodyRes.body;
+
+      if (DIAG_DIR) {
+        const n = ++DIAG_SEQ;
+        diagWrite('responses/' + n + '_' + diagSafe((url.split('?')[1] || 'resp')) + '.html', body);
+        const langs = [];
+        const re = /"(?:lang|language|langCode|locale)"\s*:\s*"([^"]{1,12})"/g;
+        let m;
+        while ((m = re.exec(body)) !== null) langs.push(m[0]);
+        diagWrite('responses/' + n + '_lang-fields.txt',
+          'url=' + url + '\ncontentType=' + ctype + '\nlength=' + body.length +
+          '\nlangFields=' + JSON.stringify(langs) + '\n');
+      }
+
+      if (!language) {
+        try { await dbg.sendCommand('Fetch.continueRequest', { requestId: id }); } catch (e) { /* ignore */ }
+        return;
+      }
+
       let changed = false;
-      body = body.replace(/("(?:lang|language)"\s*:\s*")([a-zA-Z_]{2,5})(")/g, (m, a, v, b) => {
-        if (v.toLowerCase() === language.code) return m;
+      body = body.replace(/("(?:lang|language|langCode|locale)"\s*:\s*")([a-zA-Z_]{2,5})(")/g, (mm, a, v, b) => {
+        if (v.toLowerCase() === language.code) return mm;
         changed = true;
         return a + language.code + b;
       });
+      if (DIAG_DIR) diagNote(win, 'backpage body ' + (changed ? 'REWRITTEN to ' + language.code : 'unchanged') + ' (' + url + ')');
       if (!changed) {
         try { await dbg.sendCommand('Fetch.continueRequest', { requestId: id }); } catch (e) { /* ignore */ }
         return;
@@ -309,25 +356,146 @@ function installLanguageRewrite(win) {
         body: Buffer.from(body, 'binary').toString('base64')
       });
     } catch (e) {
+      diagNote(win, 'fetch handler error: ' + e.message);
       try { await dbg.sendCommand('Fetch.continueRequest', { requestId: id }); } catch (e2) { /* ignore */ }
     }
   });
+
+  win.webContents.on('console-message', (e, level, message, line, sourceId) => {
+    try {
+      win.__diag.console.push({ level, message, line, sourceId });
+    } catch (e) { /* ignore */ }
+  });
+
+  const dumpPage = async () => {
+    if (!DIAG_DIR) return;
+    try {
+      const data = await win.webContents.executeJavaScript(`(function(){
+        var html = document.documentElement ? document.documentElement.outerHTML : '';
+        var embeds = [];
+        try {
+          var n = document.querySelectorAll('object, embed');
+          for (var i = 0; i < n.length; i++) embeds.push(n[i].outerHTML);
+        } catch (e) {}
+        var flashCalls = [];
+        try {
+          var idx = 0;
+          while ((idx = html.indexOf('flashembed(', idx)) >= 0 && flashCalls.length < 5) {
+            flashCalls.push(html.substr(idx, 1200));
+            idx += 11;
+          }
+        } catch (e) {}
+        var swfCalls = [];
+        try {
+          var j = 0;
+          while ((j = html.indexOf('embedSWF', j)) >= 0 && swfCalls.length < 5) {
+            swfCalls.push(html.substr(Math.max(0, j - 200), 1200));
+            j += 8;
+          }
+        } catch (e) {}
+        var up = null;
+        try { up = (window.User && window.User.Parameters) ? JSON.stringify(window.User.Parameters) : null; } catch (e) {}
+        return {
+          url: location.href,
+          title: document.title,
+          html: html,
+          embeds: embeds,
+          flashCalls: flashCalls,
+          swfCalls: swfCalls,
+          userParameters: up,
+          navigatorLanguage: navigator.language,
+          navigatorLanguages: (navigator.languages || []).join(','),
+          cookie: document.cookie,
+          astraLang: window.__ASTRA_LANG || null
+        };
+      })();`, true);
+
+      const n = ++DIAG_SEQ;
+      const host = diagSafe((data.url || '').split('//')[1] || 'page').split('/')[0];
+      diagWrite('pages/' + n + '_' + host + '_full.html', data.html || '');
+      const summary = Object.assign({}, data);
+      delete summary.html;
+      diagWrite('pages/' + n + '_' + host + '_summary.json', JSON.stringify(summary, null, 2));
+
+      try {
+        const cookies = await win.webContents.session.cookies.get({});
+        const relevant = cookies.filter((c) => /darkorbit|bpsecure/i.test(c.domain || ''));
+        diagWrite('pages/' + n + '_' + host + '_cookies.json', JSON.stringify(relevant, null, 2));
+      } catch (e) { /* ignore */ }
+    } catch (e) {
+      diagNote(win, 'dumpPage failed: ' + e.message);
+    }
+  };
 
   win.webContents.on('did-start-navigation', (e, u, inPlace, isMainFrame) => {
     if (isMainFrame) enable();
   });
   win.webContents.on('dom-ready', enable);
-  win.webContents.on('did-finish-load', () => {
+  win.webContents.on('did-finish-load', async () => {
+    await dumpPage();
+    if (DIAG_DIR) {
+      diagWrite('summary_' + Date.now() + '.json', JSON.stringify({
+        language: language ? language.code : null,
+        notes: win.__diag.notes,
+        requests: win.__diag.net,
+        console: win.__diag.console
+      }, null, 2));
+    }
     try {
       if (dbg.isAttached()) {
         dbg.sendCommand('Fetch.disable').catch(() => {});
+        dbg.sendCommand('Network.disable').catch(() => {});
         dbg.detach();
       }
     } catch (e) { /* ignore */ }
-    ready = false; // sonraki navigasyonda yeniden baglan
+    attached = false; // sonraki navigasyonda yeniden baglan
   });
   enable();
 }
+
+// Tanilama icin ag trafigini topla (yalnizca metin govdeleri).
+function collectNetwork(win, method, params, dbg) {
+  const d = win.__diag;
+  if (method === 'Network.requestWillBeSent') {
+    d.netById[params.requestId] = {
+      url: params.request.url,
+      method: params.request.method,
+      type: params.type,
+      status: null,
+      mimeType: null,
+      fromCache: false,
+      encodedLength: null
+    };
+    return;
+  }
+  if (method === 'Network.responseReceived') {
+    const e = d.netById[params.requestId];
+    if (e) {
+      e.status = params.response.status;
+      e.mimeType = params.response.mimeType;
+      e.fromCache = params.response.fromDiskCache || params.response.fromMemoryCache || false;
+      e.headers = params.response.headers;
+      d.net.push(e);
+    }
+    return;
+  }
+  if (method === 'Network.loadingFinished') {
+    const e = d.netById[params.requestId];
+    if (!e) return;
+    e.encodedLength = params.encodedDataLength;
+    const mt = String(e.mimeType || '').toLowerCase();
+    const texty = mt.indexOf('xml') >= 0 || mt.indexOf('json') >= 0 ||
+      mt.indexOf('javascript') >= 0 || mt.indexOf('html') >= 0 || mt.indexOf('text/plain') >= 0;
+    if (texty && params.encodedDataLength < 4 * 1024 * 1024) {
+      dbg.sendCommand('Network.getResponseBody', { requestId: params.requestId }).then((r) => {
+        const body = r.base64Encoded ? Buffer.from(r.body, 'base64').toString('utf8') : r.body;
+        diagWrite('bodies/' + diagSafe(e.url.split('//')[1] || e.url) .slice(0, 80) + '.txt',
+          'url=' + e.url + '\nmime=' + e.mimeType + '\n\n' + body);
+      }).catch(() => {});
+    }
+  }
+}
+
 
 // Site kokune gidilecekse dili URL uzerinden de sabitle (cerezden once de dogru olsun).
 function localizeUrl(url) {
@@ -487,7 +655,7 @@ function createBrowserWindow(initialUrl, partition, creds) {
   // Pencere basligi hep "Astra Browser" kalsin
   win.on('page-title-updated', (e) => e.preventDefault());
 
-  installLanguageRewrite(win);
+  installBackpageHook(win);
 
   // window.open / target=_blank -> YENI pencere, ama AYNI oturum (ayni hesap)
   win.webContents.on('new-window', (e, url) => {
@@ -532,6 +700,27 @@ function createBrowserWindow(initialUrl, partition, creds) {
   // Otomatik giris (hesap secildiginde)
   if (creds) {
     attachAutoLogin(win, creds);
+  }
+
+  // Tanilama: backpage acilinca oyun istemcisini (internalMapRevolution) kendisi acar.
+  if (DIAG_DIR && process.env.ASTRA_DIAG_AUTOSTART === '1') {
+    win.webContents.on('did-finish-load', () => {
+      try {
+        const u = win.webContents.getURL();
+        if (win.__astraAutoStarted) return;
+        if (!/indexInternal\.es\?action=internalStart/i.test(u)) return;
+        win.__astraAutoStarted = true;
+        const origin = (u.match(/^(https?:\/\/[^/]+)/) || [])[1];
+        if (!origin) return;
+        setTimeout(() => {
+          try {
+            createBrowserWindow(origin + '/indexInternal.es?action=internalMapRevolution', part);
+          } catch (e) {
+            diagNote(win, 'autostart failed: ' + e.message);
+          }
+        }, 1500);
+      } catch (e) { /* ignore */ }
+    });
   }
 
   if (initialUrl) {
@@ -945,6 +1134,11 @@ function writeVersionMarker() {
 
 app.whenReady().then(async () => {
   writeVersionMarker();
+
+  if (DIAG_DIR) {
+    try { fs.mkdirSync(DIAG_DIR, { recursive: true }); } catch (e) { /* ignore */ }
+    console.log('DIAG dir: ' + DIAG_DIR);
+  }
 
   if (args.selftest) {
     const lines = [

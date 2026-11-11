@@ -1,11 +1,11 @@
 'use strict';
 
-// Oyun/backpage dilini zorla.
-// DarkOrbit istemcisi dilini backpage'in urettigi flashembed flashvar'indan aliyor:
-//   flashembed("container", {...}, {"lang": "tr", ...})
-// Ulke sunuculari (tr4 gibi) bu degeri "tr" gonderiyor ve sayfa parametresi
-// yok sayiliyor. Secili dil varsa embed parametresini ve User.Parameters.language
-// degerini degistiriyoruz; istemci metinleri secilen dilde yukler.
+// Secili dil varsa sayfa baglaminda isaretle ve User.Parameters.language'i guncelle.
+// NOT: flashembed fonksiyonu BURADA SARILMAZ. Sayfa flashembed.getVersion() gibi
+// ozellikleri kullaniyor; sarmalama Flash istemcisinin baslamasini engelliyordu
+// ("Uncaught TypeError: flashembed.getVersion is not a function").
+// Istemciye giden "lang" flashvar'i zaten sunucu yaniti yeniden yazilarak (CDP)
+// degistiriliyor; burada sadece yedek katman var.
 (function () {
   let code = '';
   try {
@@ -19,62 +19,20 @@
   } catch (e) { /* ignore */ }
   if (!code) return;
 
-  const hook = `(function(){
-    var LANG = ${JSON.stringify(code)};
-    try { window.__ASTRA_LANG = LANG; } catch (e) {}
-    function patch(p) {
-      try {
-        if (!p || typeof p !== 'object') return p;
-        p.lang = LANG;
-        if (Object.prototype.hasOwnProperty.call(p, 'language')) p.language = LANG;
-        if (Object.prototype.hasOwnProperty.call(p, 'locale')) p.locale = LANG;
-      } catch (e) {}
-      return p;
-    }
-    var real = null;
-    try {
-      Object.defineProperty(window, 'flashembed', {
-        configurable: true,
-        get: function () {
-          if (!real) return real;
-          return function () {
-            try {
-              if (arguments.length >= 3) patch(arguments[2]);
-              else if (arguments.length === 2) patch(arguments[1]);
-            } catch (e) {}
-            return real.apply(this, arguments);
-          };
-        },
-        set: function (v) { real = v; }
-      });
-    } catch (e) {}
-    function hookSwf() {
-      try {
-        var s = window.swfobject;
-        if (s && !s.__astraHooked && typeof s.embedSWF === 'function') {
-          var orig = s.embedSWF;
-          s.embedSWF = function (u, id, w, h, ver, xi, vars) {
-            try { if (vars && typeof vars === 'object') patch(vars); } catch (e) {}
-            return orig.apply(this, arguments);
-          };
-          s.__astraHooked = true;
-        }
-      } catch (e) {}
-    }
-    var t = setInterval(hookSwf, 50);
-    setTimeout(function () { clearInterval(t); }, 20000);
-    hookSwf();
-    var u = setInterval(function () {
-      try {
-        if (window.User && window.User.Parameters) {
-          window.User.Parameters.language = LANG;
-          clearInterval(u);
-        }
-      } catch (e) {}
-    }, 100);
-    setTimeout(function () { clearInterval(u); }, 60000);
-    try { if (document.documentElement) document.documentElement.lang = LANG; } catch (e) {}
-  })();`;
+  const hook = '(function(){' +
+    'var LANG=' + JSON.stringify(code) + ';' +
+    'try{window.__ASTRA_LANG=LANG;}catch(e){}' +
+    'var tries=0;' +
+    'var t=setInterval(function(){' +
+      'try{' +
+        'if(window.User&&window.User.Parameters){' +
+          'window.User.Parameters.language=LANG;' +
+          'clearInterval(t);' +
+        '}' +
+      '}catch(e){}' +
+      'if(++tries>600)clearInterval(t);' +
+    '},100);' +
+  '})();';
 
   try {
     require('electron').webFrame.executeJavaScript(hook);
