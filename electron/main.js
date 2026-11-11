@@ -19,6 +19,8 @@ const { app, BrowserWindow, session, Menu, MenuItem, clipboard, ipcMain, net } =
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const http = require('http');
+const nodeNet = require('net');
 
 const accounts = require('./accounts');
 const { attachAutoLogin } = require('./login');
@@ -175,6 +177,176 @@ function egressIP(ses, proxyUser, proxyPass) {
       resolve('');
     }
   });
+}
+
+// ---- Yerel tunel proxy'si ----
+// Bu proxy ayni anda az sayida CONNECT tuneline izin verir; fazlasina
+// "HTTP/1.1 429 Too Many Requests" doner. Chromium bunu ERR_TUNNEL_CONNECTION_FAILED
+// olarak gorur ve sayfa yarim yuklenir (jQuery/hCaptcha gibi kritik dosyalar gelmez).
+// Bu yuzden Chromium'u kendi yerel proxy'mize baglariz; yerel proxy 429 alirsa
+// bekleyip tekrar dener ve bos bekleyen tunelleri kapatarak yer acar.
+function startThrottleProxy(opts) {
+  const upHost = opts.host;
+  const upPort = Number(opts.port);
+  const user = opts.user || '';
+  const pass = opts.pass || '';
+  // Bosta bekleyen tunel bu sure sonunda kapatilir; aksi halde Chromium'un
+  // keep-alive baglantilari proxy'nin tunel limitini tikar ve sayfa donar.
+  const idleMs = Math.max(2000, Number(opts.idleMs) || 8000);
+  const auth = (user || pass)
+    ? 'Basic ' + Buffer.from(user + ':' + pass).toString('base64')
+    : '';
+
+  const splitHostPort = (s) => {
+    const i = String(s).lastIndexOf(':');
+    if (i < 0) return [String(s), 443];
+    return [s.slice(0, i), Number(s.slice(i + 1)) || 443];
+  };
+
+  // Upstream'e CONNECT acar; 429/hata durumunda bekleyip tekrar dener.
+  const openTunnel = (tHost, tPort, onTunnel, onFail) => {
+    const attempt = (n) => {
+      const up = nodeNet.connect(upPort, upHost, () => {
+        const lines = [
+          'CONNECT ' + tHost + ':' + tPort + ' HTTP/1.1',
+          'Host: ' + tHost + ':' + tPort
+        ];
+        if (auth) lines.push('Proxy-Authorization: ' + auth);
+        up.write(lines.join('\r\n') + '\r\n\r\n');
+      });
+      let buf = Buffer.alloc(0);
+      let settled = false;
+      const retry = (code) => {
+        if (settled) return;
+        settled = true;
+        try { up.destroy(); } catch (e) { /* ignore */ }
+        const retriable = code === undefined || code === 0 || code === 429 || code === 408 || code >= 500;
+        if (!retriable || n >= 10) { onFail(); return; }
+        setTimeout(() => attempt(n + 1), 300 + n * 400);
+      };
+      up.setTimeout(25000, () => retry(0));
+      up.on('error', () => retry(0));
+      up.on('data', (chunk) => {
+        if (settled) return;
+        buf = Buffer.concat([buf, chunk]);
+        const hdrEnd = buf.indexOf('\r\n\r\n');
+        if (hdrEnd < 0) { if (buf.length > 16384) retry(0); return; }
+        const hdr = buf.slice(0, hdrEnd).toString('latin1');
+        const rest = buf.slice(hdrEnd + 4);
+        const code = parseInt((hdr.match(/^HTTP\/1\.[01] (\d+)/) || [])[1] || '0', 10);
+        if (code !== 200) { retry(code); return; }
+        settled = true;
+        up.setTimeout(0);
+        up.removeAllListeners('data');
+        up.removeAllListeners('error');
+        onTunnel(up, rest);
+      });
+    };
+    attempt(0);
+  };
+
+  const server = http.createServer((req, res) => {
+    const attempt = (n) => {
+      const headers = Object.assign({}, req.headers);
+      if (auth) headers['Proxy-Authorization'] = auth;
+      const up = http.request({
+        host: upHost, port: upPort, method: req.method, path: req.url, headers
+      }, (upRes) => {
+        const code = upRes.statusCode || 0;
+        if ((code === 429 || code >= 500) && n < 10) {
+          upRes.resume();
+          setTimeout(() => attempt(n + 1), 300 + n * 400);
+          return;
+        }
+        res.writeHead(code, upRes.headers);
+        upRes.pipe(res);
+      });
+      up.on('error', () => {
+        try { up.destroy(); } catch (e) { /* ignore */ }
+        if (n < 10) setTimeout(() => attempt(n + 1), 300 + n * 400);
+        else { try { res.destroy(); } catch (e) { /* ignore */ } }
+      });
+      if (n === 0) req.pipe(up); else up.end();
+    };
+    attempt(0);
+  });
+
+  // Tunel bosta kalirsa kapat: Chromium gerektiginde yeniden acar.
+  const keepAliveWatch = (clientSocket, up) => {
+    let timer = null;
+    const touch = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        try { up.destroy(); } catch (e) { /* ignore */ }
+        try { clientSocket.destroy(); } catch (e) { /* ignore */ }
+      }, idleMs);
+    };
+    clientSocket.on('data', touch);
+    up.on('data', touch);
+    touch();
+  };
+
+  server.on('connect', (req, clientSocket, head) => {
+    const [tHost, tPort] = splitHostPort(req.url);
+    let closed = false;
+    clientSocket.on('error', () => { /* ignore */ });
+    clientSocket.on('close', () => { closed = true; });
+    openTunnel(tHost, tPort, (up, rest) => {
+      if (closed) { try { up.destroy(); } catch (e) { /* ignore */ } return; }
+      try { clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n'); } catch (e) { /* ignore */ }
+      if (rest && rest.length) { try { clientSocket.write(rest); } catch (e) { /* ignore */ } }
+      if (head && head.length) { try { up.write(head); } catch (e) { /* ignore */ } }
+      up.pipe(clientSocket);
+      clientSocket.pipe(up);
+      keepAliveWatch(clientSocket, up);
+      up.on('close', () => { try { clientSocket.destroy(); } catch (e) { /* ignore */ } });
+      up.on('error', () => { try { clientSocket.destroy(); } catch (e) { /* ignore */ } });
+    }, () => {
+      try { clientSocket.end('HTTP/1.1 502 Bad Gateway\r\n\r\n'); } catch (e) { /* ignore */ }
+    });
+  });
+
+  return new Promise((resolve) => {
+    server.on('error', () => resolve(null));
+    server.listen(0, '127.0.0.1', () => {
+      const port = server.address().port;
+      resolve({
+        port,
+        close: () => { try { server.close(); } catch (e) { /* ignore */ } }
+      });
+    });
+  });
+}
+
+// Captcha penceresinde reklam/izleme isteklerini engeller: proxy'nin sinirli
+// tunel sayisini gereksiz yere tuketmesinler (asil istekler 429 alip kayboluyordu).
+const CAPTCHA_BLOCK_HOSTS = [
+  'googletagmanager.com', 'googletagservices.com', 'google-analytics.com',
+  'googlesyndication.com', 'googleadservices.com', 'doubleclick.net',
+  'bat.bing.com', 'clarity.ms', 'quantserve.com', 'scorecardresearch.com',
+  'cmp.inmobi.com', 'inmobi.com', 'adnxs.com', 'criteo.com', 'criteo.net',
+  'taboola.com', 'outbrain.com', 'moatads.com', 'adsafeprotected.com',
+  'hotjar.com', 'yieldmo.com', 'rubiconproject.com', 'pubmatic.com',
+  'smartadserver.com', 'facebook.net', 'connect.facebook.net'
+];
+
+function installCaptchaFilters(ses, diagDir) {
+  const logFile = diagDir ? path.join(diagDir, 'captcha_net.log') : '';
+  const log = (line) => {
+    if (!logFile) return;
+    try { fs.appendFileSync(logFile, line + '\n'); } catch (e) { /* ignore */ }
+  };
+  try {
+    ses.webRequest.onBeforeRequest((details, callback) => {
+      let host = '';
+      try { host = new URL(details.url).hostname.toLowerCase(); } catch (e) { host = ''; }
+      const blocked = !!host && CAPTCHA_BLOCK_HOSTS.some((h) => host === h || host.endsWith('.' + h));
+      log((blocked ? 'BLOCK ' : 'REQ ') + details.url);
+      callback({ cancel: blocked });
+    });
+    ses.webRequest.onCompleted((d) => log('DONE ' + d.statusCode + ' ' + d.url));
+    ses.webRequest.onErrorOccurred((d) => log('ERR ' + d.error + ' ' + d.url));
+  } catch (e) { /* ignore */ }
 }
 
 let managerWindow = null;
@@ -834,17 +1006,35 @@ async function runCaptchaMode(cfg) {
     proxyTypes.push(requested === 'http' ? 'socks5' : 'http');
   }
   let proxyIdx = 0;
+  const throttle = (proxyTypes[0] === 'http' && cfg.proxyHost && cfg.proxyPort)
+    ? await startThrottleProxy({
+      host: cfg.proxyHost,
+      port: cfg.proxyPort,
+      user: cfg.proxyUser,
+      pass: cfg.proxyPass,
+      idleMs: Number(process.env.ASTRA_PROXY_IDLE_MS) || 8000
+    })
+    : null;
+  if (throttle) {
+    console.log('Proxy tunnel: 127.0.0.1:' + throttle.port + ' -> ' +
+      cfg.proxyHost + ':' + cfg.proxyPort + ' (429 retry, bosta ' +
+      (Number(process.env.ASTRA_PROXY_IDLE_MS) || 8000) + 'ms sonra tunel kapanir)');
+  }
   const applyProxy = async () => {
     if (!proxyTypes.length) return;
     const type = proxyTypes[proxyIdx];
     try {
-      await ses.setProxy({ proxyRules: type + '://' + cfg.proxyHost + ':' + cfg.proxyPort });
-      console.log('Proxy: ' + type + '://' + cfg.proxyHost + ':' + cfg.proxyPort);
+      const rules = (type === 'http' && throttle)
+        ? 'http://127.0.0.1:' + throttle.port
+        : type + '://' + cfg.proxyHost + ':' + cfg.proxyPort;
+      await ses.setProxy({ proxyRules: rules });
+      console.log('Proxy: ' + rules);
     } catch (e) {
       console.error('Proxy ayarlanamadi: ' + e);
     }
   };
   await applyProxy();
+  installCaptchaFilters(ses, DIAG_DIR);
 
   const resultFile = cfg.resultFile;
   const timeoutMs = Math.max(10000, cfg.timeout || 120000);
@@ -864,6 +1054,7 @@ async function runCaptchaMode(cfg) {
     if (currentIp && !String(text).startsWith('[captchaResult]')) out = text + '|astraIp=' + currentIp;
     try { if (resultFile) fs.writeFileSync(resultFile, out, 'utf8'); } catch (e) { /* ignore */ }
     try { console.log(out); } catch (e) { /* ignore */ }
+    try { if (throttle) throttle.close(); } catch (e) { /* ignore */ }
     setTimeout(() => { try { app.quit(); } catch (e) { /* ignore */ } }, delayMs === undefined ? 200 : delayMs);
   };
 
@@ -885,6 +1076,76 @@ async function runCaptchaMode(cfg) {
   });
   win.setMenuBarVisibility(false);
   win.on('closed', () => { if (!done) finish('[captchaFailed]closed'); });
+
+  // Tanilama: captcha penceresi neden bos kaliyor? (yalnizca ASTRA_DIAG_DIR verildiginde)
+  if (DIAG_DIR) {
+    try { fs.mkdirSync(path.join(DIAG_DIR, 'shots'), { recursive: true }); } catch (e) { /* ignore */ }
+    let shot = 0;
+    const capture = async (tag) => {
+      if (win.isDestroyed()) return;
+      const n = ++shot;
+      try {
+        const img = await win.webContents.capturePage();
+        fs.writeFileSync(path.join(DIAG_DIR, 'shots', n + '_' + tag + '.png'), img.toPNG());
+      } catch (e) { /* ignore */ }
+      try {
+        const info = await win.webContents.executeJavaScript(`(function(){
+          var t = document.body ? document.body.innerText : '';
+          var frames = [];
+          try {
+            var f = document.querySelectorAll('iframe');
+            for (var i = 0; i < f.length; i++) {
+              var r = f[i].getBoundingClientRect();
+              frames.push({
+                src: String(f[i].src || '').split('#')[0],
+                hash: String(f[i].src || '').split('#')[1] || '',
+                x: Math.round(r.x), y: Math.round(r.y),
+                w: Math.round(r.width), h: Math.round(r.height),
+                visible: !!(r.width && r.height)
+              });
+            }
+          } catch (e) {}
+          return {
+            url: location.href,
+            title: document.title,
+            innerTextLen: t.length,
+            innerText: t.slice(0, 1500),
+            hasBox: !!document.querySelector('.bgcdw_captcha'),
+            hasHcaptchaFrame: !!document.querySelector('iframe[src*="hcaptcha"], iframe[title*="hCaptcha"]'),
+            frames: frames,
+            viewport: { w: window.innerWidth, h: window.innerHeight, scrollY: Math.round(window.scrollY) },
+            imgs: document.images ? document.images.length : 0,
+            htmlLen: document.documentElement ? document.documentElement.outerHTML.length : 0,
+            html: document.documentElement ? document.documentElement.outerHTML : ''
+          };
+        })();`, true);
+        const html = info.html || '';
+        delete info.html;
+        fs.writeFileSync(path.join(DIAG_DIR, 'shots', n + '_' + tag + '.json'), JSON.stringify(info, null, 2));
+        fs.writeFileSync(path.join(DIAG_DIR, 'shots', n + '_' + tag + '.html'), html);
+      } catch (e) { /* ignore */ }
+    };
+    win.webContents.on('console-message', (e, level, message) => {
+      try { fs.appendFileSync(path.join(DIAG_DIR, 'captcha_console.log'), level + ' ' + message + '\n'); } catch (e2) { /* ignore */ }
+    });
+    try {
+      const netLog = path.join(DIAG_DIR, 'captcha_net.log');
+      const wr = win.webContents.session.webRequest;
+      wr.onCompleted((d) => {
+        try { fs.appendFileSync(netLog, 'DONE ' + d.statusCode + ' ' + d.url + '\n'); } catch (e2) { /* ignore */ }
+      });
+      wr.onErrorOccurred((d) => {
+        try { fs.appendFileSync(netLog, 'ERR ' + d.error + ' ' + d.url + '\n'); } catch (e2) { /* ignore */ }
+      });
+    } catch (e) { /* ignore */ }
+    win.webContents.on('did-finish-load', () => { capture('loaded'); });
+    win.webContents.on('did-fail-load', (e, code, desc, url, isMain) => {
+      if (!isMain) return;
+      diagWrite('captcha_fail.txt', code + ' ' + desc + ' ' + url + '\n');
+      capture('fail_' + code);
+    });
+    [10000, 25000, 40000].forEach((ms) => setTimeout(() => capture('t' + (ms / 1000)), ms));
+  }
 
   const refreshIp = async () => {
     currentIp = await egressIP(ses, cfg.proxyUser, cfg.proxyPass);
@@ -943,13 +1204,16 @@ async function runCaptchaMode(cfg) {
           finish('[captchaNotRequired]', 1200);
           return;
         }
-        // Kutu var ama hCaptcha iframe'i hic olusmadi: widget yuklenemedi
-        // (genelde proxy js.hcaptcha.com / newassets.hcaptcha.com'u engelliyor).
-        setTimeout(async () => {
+        if (probe.hasFrame) return;
+        // Kutu var ama hCaptcha iframe'i hic olusmadi: api.js istegi proxy'de
+        // kaybolmus olabilir (429 / tunel hatasi). Yeniden enjekte edip dene.
+        let attempt = 0;
+        const tick = async () => {
           if (done || win.isDestroyed()) return;
           try {
-            const p2 = await win.webContents.executeJavaScript(pageProbe, true);
-            if (p2.hasBox && !p2.hasFrame) {
+            const p = await win.webContents.executeJavaScript(pageProbe, true);
+            if (p.hasFrame) { scrollToCaptcha(); return; }
+            if (attempt >= 6) {
               try {
                 await win.webContents.executeJavaScript(`(function(){
                   if (document.getElementById('astra-note')) return;
@@ -961,9 +1225,32 @@ async function runCaptchaMode(cfg) {
                 })();`, true);
               } catch (e) { /* ignore */ }
               finish('[captchaFailed]hcaptcha-not-loaded', 5000);
+              return;
             }
+            attempt++;
+            await win.webContents.executeJavaScript(`(function(){
+              try {
+                if (window.hcaptcha && window.hcaptcha.render) {
+                  var el = document.querySelector('.h-captcha');
+                  if (el && !el.querySelector('iframe')) {
+                    try { window.hcaptcha.render(el, { sitekey: el.getAttribute('data-sitekey') }); } catch (e) {}
+                  }
+                }
+              } catch (e) {}
+              try {
+                var old = document.getElementById('astra-hc-retry');
+                if (old) old.parentNode.removeChild(old);
+                var s = document.createElement('script');
+                s.id = 'astra-hc-retry';
+                s.src = 'https://js.hcaptcha.com/1/api.js?r=' + Date.now();
+                s.async = true;
+                document.head.appendChild(s);
+              } catch (e) {}
+            })();`, true);
+            setTimeout(tick, 4000);
           } catch (e) { /* ignore */ }
-        }, 8000);
+        };
+        setTimeout(tick, 3000);
       } catch (e) { /* ignore */ }
     }, 5000);
   };
