@@ -1193,6 +1193,108 @@ async function runCaptchaMode(cfg) {
     };
   })();`;
 
+  // ---- Captcha otomatik tiklama (TEST) ----
+  // Varsayilan KAPALI. Acmak icin: %APPDATA%\Astra Browser\settings.json ->
+  // {"captchaAutoClick": true}  ya da ortam degiskeni ASTRA_CAPTCHA_AUTOCLICK=1.
+  // Tek deneme yapar: tiklama ise yaramazsa kullanici elle cozer (mevcut akis aynen durur).
+  const autoClickEnabled = (() => {
+    const env = String(process.env.ASTRA_CAPTCHA_AUTOCLICK || '').toLowerCase();
+    if (env === '1' || env === 'true' || env === 'yes' || env === 'on') return true;
+    if (env === '0' || env === 'false' || env === 'no' || env === 'off') return false;
+    try { return readSettings().captchaAutoClick === true; } catch (e) { return false; }
+  })();
+  let autoClickDone = false;
+
+  const captchaState = `(function(){
+    var tok = '';
+    try {
+      var els = document.querySelectorAll('textarea[name="h-captcha-response"], input[name="h-captcha-response"], textarea[name="g-recaptcha-response"], input[name="g-recaptcha-response"]');
+      for (var i = 0; i < els.length; i++) {
+        var v = (els[i].value || '').trim();
+        if (v.length > 20) { tok = v; break; }
+      }
+    } catch (e) {}
+    var checkbox = null;
+    var challengeOpen = false;
+    try {
+      var f = document.querySelectorAll('iframe[src*="hcaptcha"]');
+      for (var j = 0; j < f.length; j++) {
+        var s = String(f[j].src || '');
+        var r = f[j].getBoundingClientRect();
+        var vis = r.width > 0 && r.height > 0 && r.y > -500;
+        if (s.indexOf('frame=challenge') >= 0 && vis) challengeOpen = true;
+        if (s.indexOf('frame=checkbox') >= 0 && vis) {
+          // kutunun solundaki checkbox alanini nisan al
+          checkbox = { x: Math.round(r.x + 26), y: Math.round(r.y + r.height / 2) };
+        }
+      }
+    } catch (e) {}
+    return { token: tok, checkbox: checkbox, challengeOpen: challengeOpen };
+  })();`;
+
+  const autoClickCaptcha = async () => {
+    if (!autoClickEnabled || autoClickDone || done || win.isDestroyed()) return;
+    let st = null;
+    try { st = await win.webContents.executeJavaScript(captchaState, true); } catch (e) { return; }
+    if (!st || st.token || st.challengeOpen || !st.checkbox) return;
+    autoClickDone = true;
+
+    const dbg = win.webContents.debugger;
+    let attachedHere = false;
+    try {
+      if (!dbg.isAttached()) { dbg.attach('1.3'); attachedHere = true; }
+    } catch (e) {
+      console.log('Auto-click: debugger attach failed: ' + e.message);
+      return;
+    }
+
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const rnd = (a, b) => a + Math.random() * (b - a);
+    const tx = st.checkbox.x;
+    const ty = st.checkbox.y;
+    const send = (type, x, y, buttons, clickCount) => dbg.sendCommand('Input.dispatchMouseEvent', {
+      type,
+      x: Math.round(x),
+      y: Math.round(y),
+      button: type === 'mouseMoved' ? 'none' : 'left',
+      buttons: buttons | 0,
+      clickCount: clickCount | 0
+    }).catch(() => {});
+
+    try {
+      // Imleci kutunun alt tarafindan baslatip kucuk adimlarla kutuya gotur.
+      const sx = Math.max(8, tx - rnd(70, 150));
+      const sy = ty + rnd(90, 170);
+      const steps = 9;
+      for (let i = 1; i <= steps; i++) {
+        const t = i / steps;
+        await send('mouseMoved', sx + (tx - sx) * t + rnd(-3, 3), sy + (ty - sy) * t + rnd(-3, 3), 0, 0);
+        await wait(rnd(25, 65));
+      }
+      await send('mouseMoved', tx + rnd(-1, 1), ty + rnd(-1, 1), 0, 0);
+      await wait(rnd(120, 260));
+      await send('mousePressed', tx, ty, 1, 1);
+      await wait(rnd(55, 120));
+      await send('mouseReleased', tx, ty, 0, 1);
+      console.log('Auto-click: checkbox at ' + tx + ',' + ty);
+
+      try {
+        await win.webContents.executeJavaScript(`(function(){
+          if (document.getElementById('astra-autoclick')) return;
+          var d = document.createElement('div');
+          d.id = 'astra-autoclick';
+          d.style.cssText = 'position:fixed;left:8px;bottom:8px;background:rgba(0,0,0,.78);color:#ffd479;font:12px Segoe UI,Arial;padding:4px 8px;border-radius:4px;z-index:2147483647';
+          d.textContent = 'Auto-click sent. If a challenge appears, solve it manually.';
+          document.body.appendChild(d);
+        })();`, true);
+      } catch (e) { /* ignore */ }
+    } catch (e) {
+      console.log('Auto-click failed: ' + e.message);
+    } finally {
+      if (attachedHere) { try { dbg.detach(); } catch (e) { /* ignore */ } }
+    }
+  };
+
   const scheduleNoCaptchaCheck = () => {
     if (noCaptchaTimer) clearTimeout(noCaptchaTimer);
     noCaptchaTimer = setTimeout(async () => {
@@ -1212,7 +1314,7 @@ async function runCaptchaMode(cfg) {
           if (done || win.isDestroyed()) return;
           try {
             const p = await win.webContents.executeJavaScript(pageProbe, true);
-            if (p.hasFrame) { scrollToCaptcha(); return; }
+            if (p.hasFrame) { scrollToCaptcha(); setTimeout(autoClickCaptcha, 900); return; }
             if (attempt >= 6) {
               try {
                 await win.webContents.executeJavaScript(`(function(){
@@ -1279,6 +1381,7 @@ async function runCaptchaMode(cfg) {
         if (probe.hasBox && probe.boxH > 0) {
           clearInterval(iv);
           scrollToCaptcha();
+          if (probe.hasFrame) setTimeout(autoClickCaptcha, 1200);
         }
       } catch (e) { clearInterval(iv); }
     }, 500);
