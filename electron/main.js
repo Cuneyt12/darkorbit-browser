@@ -217,6 +217,46 @@ function applyLanguageToSession(ses) {
   } catch (e) { /* ignore */ }
 }
 
+// DarkOrbit sayfa dilini Accept-Language degil, ".darkorbit.com" uzerindeki
+// "lang" cerezi belirliyor; her oturumda o cerezi aciyoruz.
+function applyLanguageCookie(ses) {
+  if (!language) return Promise.resolve();
+  try {
+    return ses.cookies.set({
+      url: 'https://www.darkorbit.com/',
+      name: 'lang',
+      value: language.code,
+      domain: '.darkorbit.com',
+      path: '/',
+      secure: true,
+      httpOnly: true,
+      expirationDate: Math.floor(Date.now() / 1000) + 31536000
+    }).catch(() => {});
+  } catch (e) {
+    return Promise.resolve();
+  }
+}
+
+function prepareLanguageSession(ses) {
+  applyLanguageToSession(ses);
+  return applyLanguageCookie(ses);
+}
+
+// Site kokune gidilecekse dili URL uzerinden de sabitle (cerezden once de dogru olsun).
+function localizeUrl(url) {
+  if (!language || !isHttp(url)) return url;
+  try {
+    const u = new URL(url);
+    if (!/(^|\.)darkorbit\.com$/i.test(u.hostname)) return url;
+    if ((u.pathname === '/' || u.pathname === '') && !u.search) {
+      u.pathname = '/index.es';
+      u.search = '?lang=' + language.code;
+      return u.toString();
+    }
+  } catch (e) { /* ignore */ }
+  return url;
+}
+
 function changeLanguage(code) {
   const s = readSettings();
   if (code) s.language = code; else delete s.language;
@@ -244,8 +284,7 @@ function buildAppMenu() {
       type: 'radio',
       checked: !language,
       click: () => changeLanguage('')
-    },
-    { type: 'separator' }
+    }
   ].concat(LANGUAGES.map((l) => ({
     label: l.label + ' (' + l.code + ')',
     type: 'radio',
@@ -321,7 +360,8 @@ function buildAppMenu() {
  */
 function createBrowserWindow(initialUrl, partition, creds) {
   const part = partition || ('astra-' + rid());
-  applyLanguageToSession(session.fromPartition(part));
+  const ses = session.fromPartition(part);
+  const languageReady = prepareLanguageSession(ses);
 
   const win = new BrowserWindow({
     width: 1280,
@@ -405,7 +445,9 @@ function createBrowserWindow(initialUrl, partition, creds) {
   }
 
   if (initialUrl) {
-    win.loadURL(initialUrl, { userAgent: FALLBACK_UA });
+    languageReady.then(() => {
+      if (!win.isDestroyed()) win.loadURL(localizeUrl(initialUrl), { userAgent: FALLBACK_UA });
+    });
   }
   return win;
 }
@@ -413,8 +455,9 @@ function createBrowserWindow(initialUrl, partition, creds) {
 /** Verilen pencerede hesap ile otomatik giris yapar (aktif pencere). */
 async function loginInWindow(win, account) {
   try { await win.webContents.session.clearStorageData({ storages: ['cookies'] }); } catch (e) { /* ignore */ }
+  try { await applyLanguageCookie(win.webContents.session); } catch (e) { /* ignore */ }
   attachAutoLogin(win, account);
-  win.loadURL('https://www.darkorbit.com/', { userAgent: FALLBACK_UA });
+  win.loadURL(localizeUrl('https://www.darkorbit.com/'), { userAgent: FALLBACK_UA });
   if (!win.isDestroyed()) win.focus();
 }
 
@@ -502,6 +545,7 @@ async function runCaptchaMode(cfg) {
   const ses = session.fromPartition(partition);
   try { ses.setUserAgent(ua); } catch (e) { /* ignore */ }
   applyLanguageToSession(ses);
+  await applyLanguageCookie(ses);
 
   const proxyTypes = [];
   if (cfg.proxyHost && cfg.proxyPort) {
@@ -686,7 +730,7 @@ async function runCaptchaMode(cfg) {
       console.log('Load failed (' + errorCode + '), proxy tipi tekrar deneniyor: ' + proxyTypes[proxyIdx]);
       await applyProxy();
       await refreshIp();
-      try { await win.loadURL(cfg.url || 'https://www.darkorbit.com/', { userAgent: ua }); } catch (e) { /* asagida ele alinir */ }
+      try { await win.loadURL(localizeUrl(cfg.url || 'https://www.darkorbit.com/'), { userAgent: ua }); } catch (e) { /* asagida ele alinir */ }
       return;
     }
     const reason = '[captchaFailed]load:' + errorCode + ':' + errorDescription +
@@ -721,7 +765,9 @@ async function runCaptchaMode(cfg) {
   try { win.show(); win.focus(); } catch (e) { /* ignore */ }
 
   try {
-    await win.loadURL(cfg.url || 'https://www.darkorbit.com/', { userAgent: ua });
+    const targetUrl = localizeUrl(cfg.url || 'https://www.darkorbit.com/');
+    console.log('Captcha URL: ' + targetUrl);
+    await win.loadURL(targetUrl, { userAgent: ua });
   } catch (e) {
     if (!done) console.log('loadURL rejected: ' + e.message);
   }
@@ -845,7 +891,7 @@ app.whenReady().then(async () => {
     const partition = 'astra-' + rid();
     const ses = session.fromPartition(partition);
     try { ses.setUserAgent(FALLBACK_UA); } catch (e) { /* ignore */ }
-    applyLanguageToSession(ses);
+    await prepareLanguageSession(ses);
 
     // dosid cookie'sini YALNIZCA bu pencerenin oturumuna ekle
     if (target.sid && target.origin) {
