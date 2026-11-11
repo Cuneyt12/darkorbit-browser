@@ -242,6 +242,93 @@ function prepareLanguageSession(ses) {
   return applyLanguageCookie(ses);
 }
 
+// Backpage HTML'i sunucudan "tr" olarak geliyor (ulke sunuculari). Istemci dilini
+// bu HTML'deki flashvar belirledigi icin yanit govdesini CDP ile yeniden yaziyoruz:
+//   "lang":"tr"  ->  "lang":"de"
+// Boylece TR sunucusunda da oyun istemcisi secilen dilde acilir.
+function installLanguageRewrite(win) {
+  if (!language) return;
+  const dbg = win.webContents.debugger;
+  let ready = false;
+  let busy = false;
+
+  const enable = () => {
+    if (ready || busy) return;
+    busy = true;
+    try {
+      if (!dbg.isAttached()) dbg.attach('1.3');
+    } catch (e) {
+      /* zaten bagli olabilir */
+    }
+    ready = true;
+    busy = false;
+    dbg.sendCommand('Fetch.enable', {
+      patterns: [{ urlPattern: '*indexInternal.es*', requestStage: 'Response' }]
+    }).catch(() => { /* ignore */ });
+  };
+
+  dbg.on('message', async (event, method, params) => {
+    if (method !== 'Fetch.requestPaused') return;
+    const id = params.requestId;
+    const url = params.request ? params.request.url : '';
+    if (!params.responseStatusCode || !/indexInternal\.es/i.test(url)) {
+      try { await dbg.sendCommand('Fetch.continueRequest', { requestId: id }); } catch (e) { /* ignore */ }
+      return;
+    }
+    const ctype = (params.responseHeaders || [])
+      .filter((h) => h.name.toLowerCase() === 'content-type')
+      .map((h) => String(h.value || '').toLowerCase())
+      .join(';');
+    if (ctype && ctype.indexOf('text/html') < 0) {
+      try { await dbg.sendCommand('Fetch.continueRequest', { requestId: id }); } catch (e) { /* ignore */ }
+      return;
+    }
+    try {
+      const bodyRes = await dbg.sendCommand('Fetch.getResponseBody', { requestId: id });
+      let body = bodyRes.base64Encoded
+        ? Buffer.from(bodyRes.body, 'base64').toString('binary')
+        : bodyRes.body;
+      let changed = false;
+      body = body.replace(/("(?:lang|language)"\s*:\s*")([a-zA-Z_]{2,5})(")/g, (m, a, v, b) => {
+        if (v.toLowerCase() === language.code) return m;
+        changed = true;
+        return a + language.code + b;
+      });
+      if (!changed) {
+        try { await dbg.sendCommand('Fetch.continueRequest', { requestId: id }); } catch (e) { /* ignore */ }
+        return;
+      }
+      const headers = (params.responseHeaders || []).filter((h) => {
+        const n = h.name.toLowerCase();
+        return n !== 'content-length' && n !== 'content-encoding' && n !== 'transfer-encoding';
+      });
+      await dbg.sendCommand('Fetch.fulfillRequest', {
+        requestId: id,
+        responseCode: params.responseStatusCode,
+        responseHeaders: headers,
+        body: Buffer.from(body, 'binary').toString('base64')
+      });
+    } catch (e) {
+      try { await dbg.sendCommand('Fetch.continueRequest', { requestId: id }); } catch (e2) { /* ignore */ }
+    }
+  });
+
+  win.webContents.on('did-start-navigation', (e, u, inPlace, isMainFrame) => {
+    if (isMainFrame) enable();
+  });
+  win.webContents.on('dom-ready', enable);
+  win.webContents.on('did-finish-load', () => {
+    try {
+      if (dbg.isAttached()) {
+        dbg.sendCommand('Fetch.disable').catch(() => {});
+        dbg.detach();
+      }
+    } catch (e) { /* ignore */ }
+    ready = false; // sonraki navigasyonda yeniden baglan
+  });
+  enable();
+}
+
 // Site kokune gidilecekse dili URL uzerinden de sabitle (cerezden once de dogru olsun).
 function localizeUrl(url) {
   if (!language || !isHttp(url)) return url;
@@ -375,7 +462,8 @@ function createBrowserWindow(initialUrl, partition, creds) {
       plugins: true,
       contextIsolation: true,
       nodeIntegration: false,
-      preload: path.join(__dirname, 'browser-preload.js')
+      preload: path.join(__dirname, 'browser-preload.js'),
+      additionalArguments: language ? ['--astra-lang=' + language.code] : []
     }
   });
 
@@ -398,6 +486,8 @@ function createBrowserWindow(initialUrl, partition, creds) {
 
   // Pencere basligi hep "Astra Browser" kalsin
   win.on('page-title-updated', (e) => e.preventDefault());
+
+  installLanguageRewrite(win);
 
   // window.open / target=_blank -> YENI pencere, ama AYNI oturum (ayni hesap)
   win.webContents.on('new-window', (e, url) => {
