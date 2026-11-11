@@ -25,6 +25,26 @@ const { attachAutoLogin } = require('./login');
 
 const APP_NAME = 'Astra Browser';
 
+// Desteklenen arayuz/oyun dilleri. Electron'da navigator.language ve
+// Accept-Language bu koddan turetilir.
+const LANGUAGES = [
+  { code: 'en', label: 'English', locale: 'en-US' },
+  { code: 'de', label: 'Deutsch', locale: 'de-DE' },
+  { code: 'es', label: 'Espanol', locale: 'es-ES' },
+  { code: 'fr', label: 'Francais', locale: 'fr-FR' },
+  { code: 'it', label: 'Italiano', locale: 'it-IT' },
+  { code: 'pl', label: 'Polski', locale: 'pl-PL' },
+  { code: 'pt', label: 'Portugues', locale: 'pt-PT' },
+  { code: 'ro', label: 'Romana', locale: 'ro-RO' },
+  { code: 'ru', label: 'Russkiy', locale: 'ru-RU' },
+  { code: 'tr', label: 'Turkce', locale: 'tr-TR' },
+  { code: 'cs', label: 'Cestina', locale: 'cs-CZ' },
+  { code: 'hu', label: 'Magyar', locale: 'hu-HU' },
+  { code: 'nl', label: 'Nederlands', locale: 'nl-NL' },
+  { code: 'bg', label: 'Balgarski', locale: 'bg-BG' },
+  { code: 'el', label: 'Ellinika', locale: 'el-GR' }
+];
+
 // Pencere/gorev cubugu ikonu (resources\app\icon.png = astra2.png)
 const ICON_PATH = path.join(__dirname, 'icon.png');
 
@@ -49,7 +69,7 @@ function parseArgs(argv) {
   const out = {
     dosid: null, url: null, instance: null, selftest: false,
     captcha: false, client: null, resultFile: null, timeout: 120000,
-    width: 430, height: 650,
+    width: 430, height: 650, lang: null,
     proxyHost: null, proxyPort: null, proxyUser: null, proxyPass: null, proxyType: null
   };
   for (let i = 0; i < argv.length; i++) {
@@ -83,6 +103,7 @@ function parseArgs(argv) {
     else if (key === '--proxy-user') out.proxyUser = take();
     else if (key === '--proxy-pass') out.proxyPass = take();
     else if (key === '--proxy-type') out.proxyType = take();
+    else if (key === '--lang') out.lang = (take() || '').toLowerCase();
   }
   return out;
 }
@@ -159,8 +180,79 @@ function egressIP(ses, proxyUser, proxyPass) {
 let managerWindow = null;
 let activeBrowserWindow = null;
 
+// Secili dil: --lang > ASTRA_LANG > settings.json
+let language = null;
+
+function resolveLanguage() {
+  let code = '';
+  try {
+    const a = process.argv.slice(1);
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] === '--lang' && a[i + 1]) { code = a[i + 1]; break; }
+      if (a[i].indexOf('--lang=') === 0) { code = a[i].slice(7); break; }
+    }
+  } catch (e) { /* ignore */ }
+  if (!code && process.env.ASTRA_LANG) code = process.env.ASTRA_LANG;
+  if (!code) {
+    try { code = readSettings().language || ''; } catch (e) { code = ''; }
+  }
+  code = String(code || '').toLowerCase().slice(0, 2);
+  if (!code || code === 'sy') return null;
+  return LANGUAGES.find((l) => l.code === code) || null;
+}
+
+// Her oturumda Accept-Language'i sabitler; navigator.language icin --lang yeterli.
+function applyLanguageToSession(ses) {
+  if (!language) return;
+  const header = language.locale + ',' + language.code + ';q=0.9,en;q=0.8';
+  try {
+    ses.webRequest.onBeforeSendHeaders((details, callback) => {
+      const headers = details.requestHeaders || {};
+      for (const key of Object.keys(headers)) {
+        if (key.toLowerCase() === 'accept-language') delete headers[key];
+      }
+      headers['Accept-Language'] = header;
+      callback({ requestHeaders: headers });
+    });
+  } catch (e) { /* ignore */ }
+}
+
+function changeLanguage(code) {
+  const s = readSettings();
+  if (code) s.language = code; else delete s.language;
+  writeSettings(s);
+
+  // --lang argumanini (ve degerini) cikarip yeniden baslat
+  const baseArgs = [];
+  const src = process.argv.slice(1);
+  for (let i = 0; i < src.length; i++) {
+    const a = src[i];
+    if (a === '--lang') { i++; continue; }
+    if (a.indexOf('--lang=') === 0) continue;
+    baseArgs.push(a);
+  }
+  if (code) baseArgs.push('--lang', code);
+  app.relaunch({ args: baseArgs });
+  app.exit(0);
+}
+
 /** Ust menu (tarayici icinden Accounts'a erisim + standart kisayollar). */
 function buildAppMenu() {
+  const languageItems = [
+    {
+      label: 'System default',
+      type: 'radio',
+      checked: !language,
+      click: () => changeLanguage('')
+    },
+    { type: 'separator' }
+  ].concat(LANGUAGES.map((l) => ({
+    label: l.label + ' (' + l.code + ')',
+    type: 'radio',
+    checked: !!language && language.code === l.code,
+    click: () => changeLanguage(l.code)
+  })));
+
   const template = [
     {
       label: 'Accounts',
@@ -170,6 +262,10 @@ function buildAppMenu() {
         { type: 'separator' },
         { role: 'quit' }
       ]
+    },
+    {
+      label: 'Language',
+      submenu: languageItems
     },
     {
       label: 'Navigate',
@@ -225,6 +321,7 @@ function buildAppMenu() {
  */
 function createBrowserWindow(initialUrl, partition, creds) {
   const part = partition || ('astra-' + rid());
+  applyLanguageToSession(session.fromPartition(part));
 
   const win = new BrowserWindow({
     width: 1280,
@@ -404,6 +501,7 @@ async function runCaptchaMode(cfg) {
   const partition = 'astra-captcha-' + rid();
   const ses = session.fromPartition(partition);
   try { ses.setUserAgent(ua); } catch (e) { /* ignore */ }
+  applyLanguageToSession(ses);
 
   const proxyTypes = [];
   if (cfg.proxyHost && cfg.proxyPort) {
@@ -644,6 +742,14 @@ if (process.env.ASTRA_PROXY_PORT) args.proxyPort = process.env.ASTRA_PROXY_PORT;
 if (process.env.ASTRA_PROXY_USER) args.proxyUser = process.env.ASTRA_PROXY_USER;
 if (process.env.ASTRA_PROXY_PASS) args.proxyPass = process.env.ASTRA_PROXY_PASS;
 if (process.env.ASTRA_PROXY_TYPE) args.proxyType = process.env.ASTRA_PROXY_TYPE;
+if (process.env.ASTRA_LANG) args.lang = process.env.ASTRA_LANG;
+
+// Dil: --lang / ASTRA_LANG / settings.json. --lang switch'i ready'den once verilmeli.
+language = resolveLanguage();
+if (language) {
+  app.commandLine.appendSwitch('lang', language.code);
+  console.log('Language: ' + language.code + ' (' + language.locale + ')');
+}
 
 // Proxy kimlik dogrulamasi (SOCKS5/HTTP). Bot ile ayni proxy kullanildiginda gerekir.
 if (args.proxyHost && args.proxyPort) {
@@ -739,6 +845,7 @@ app.whenReady().then(async () => {
     const partition = 'astra-' + rid();
     const ses = session.fromPartition(partition);
     try { ses.setUserAgent(FALLBACK_UA); } catch (e) { /* ignore */ }
+    applyLanguageToSession(ses);
 
     // dosid cookie'sini YALNIZCA bu pencerenin oturumuna ekle
     if (target.sid && target.origin) {

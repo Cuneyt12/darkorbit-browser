@@ -71,6 +71,22 @@ Accounts and their passwords are stored at `%APPDATA%\Astra Browser\accounts.jso
 | `--proxy-host <host>`, `--proxy-port <port>` | Proxy used by the captcha window. |
 | `--proxy-user <user>`, `--proxy-pass <pass>` | Proxy credentials. |
 | `--proxy-type <http\|socks5>` | Proxy type (default `http`; HTTP CONNECT auth is more reliable in Chromium). |
+| `--lang <code>` | Browser language (`en`, `de`, `es`, `fr`, `it`, `pl`, `pt`, `ro`, `ru`, `tr`, `cs`, `hu`, `nl`, `bg`, `el`). Sets `navigator.language` and the `Accept-Language` header. |
+
+### Language
+
+The browser language controls both `navigator.language` and the `Accept-Language`
+request header, so the DarkOrbit pages (login, backpage, hCaptcha widget) are served
+in that language.
+
+- GUI: top menu **Language**, pick a language; the app restarts with it.
+- CLI: `"Astra Browser.exe" --lang de`
+- Env: `set ASTRA_LANG=de` (inherited by the bot when it launches the captcha window)
+- Persisted in `%APPDATA%\Astra Browser\settings.json` as `language`.
+
+`System default` removes the override and uses the Windows locale. The language
+does not change the in-game language of an account; that is stored on the DarkOrbit
+account itself and follows the site's selector.
 
 ### Captcha mode
 
@@ -88,6 +104,7 @@ set ASTRA_PROXY_HOST=127.0.0.1
 set ASTRA_PROXY_PORT=8080
 set ASTRA_PROXY_USER=user
 set ASTRA_PROXY_PASS=pass
+set ASTRA_LANG=de
 "Astra Browser.exe"
 ```
 
